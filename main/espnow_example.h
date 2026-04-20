@@ -1,13 +1,15 @@
-/* ESPNOW 示例 - 精简版
+/* ESPNOW 示例
 
-   演示 ESPNOW 基本的发送与接收功能。
-   准备两台设备：一台发送，一台接收。
+   本示例代码属于公共领域（或根据您的选择采用 CC0 许可）
+
+   除非适用法律要求或书面同意，本软件按"原样"分发，
+   不提供任何明示或暗示的保证。
 */
 
 #ifndef ESPNOW_EXAMPLE_H
 #define ESPNOW_EXAMPLE_H
 
-/* WiFi 模式：站点或软AP，通过 menuconfig 配置 */
+/* ESPNOW 可在 station 或 softap 模式下工作，通过 menuconfig 配置 */
 #if CONFIG_ESPNOW_WIFI_MODE_STATION
 #define ESPNOW_WIFI_MODE WIFI_MODE_STA
 #define ESPNOW_WIFI_IF   ESP_IF_WIFI_STA
@@ -18,61 +20,65 @@
 
 #define ESPNOW_QUEUE_SIZE           6
 
-/* 判断 MAC 地址是否为广播地址 (FF:FF:FF:FF:FF:FF) */
-#define IS_BROADCAST_ADDR(addr) (memcmp(addr, s_broadcast_mac, ESP_NOW_ETH_ALEN) == 0)
+#define IS_BROADCAST_ADDR(addr) (memcmp(addr, s_example_broadcast_mac, ESP_NOW_ETH_ALEN) == 0)
 
-/* 从回调函数投递到应用任务的事件 ID */
 typedef enum {
     EXAMPLE_ESPNOW_SEND_CB,
     EXAMPLE_ESPNOW_RECV_CB,
 } example_espnow_event_id_t;
 
-/* 发送回调携带的数据 */
+/* 发送回调事件数据 */
 typedef struct {
-    uint8_t mac_addr[ESP_NOW_ETH_ALEN];
-    esp_now_send_status_t status;
+    uint8_t mac_addr[ESP_NOW_ETH_ALEN];   //目标 MAC 地址
+    esp_now_send_status_t status;         //发送状态
 } example_espnow_event_send_cb_t;
 
-/* 接收回调携带的数据 */
+/* 接收回调事件数据 */
 typedef struct {
-    uint8_t mac_addr[ESP_NOW_ETH_ALEN];
-    uint8_t *data;
-    int data_len;
+    uint8_t mac_addr[ESP_NOW_ETH_ALEN];   //源 MAC 地址
+    uint8_t *data;                        //数据指针
+    int data_len;                         //数据长度
 } example_espnow_event_recv_cb_t;
 
-/* 联合体：存放发送或接收回调信息 */
+/* 事件信息联合体 */
 typedef union {
-    example_espnow_event_send_cb_t send_cb;
-    example_espnow_event_recv_cb_t recv_cb;
+    example_espnow_event_send_cb_t send_cb;   //发送回调信息
+    example_espnow_event_recv_cb_t recv_cb;   //接收回调信息
 } example_espnow_event_info_t;
 
-/* 投递到队列的事件结构体 */
+/* 当 ESPNOW 发送或接收回调被调用时，将事件投递到 ESPNOW 任务 */
 typedef struct {
     example_espnow_event_id_t id;
     example_espnow_event_info_t info;
 } example_espnow_event_t;
 
-/* ESPNOW 数据包头 - 每个数据包前都会附加此头部 */
+enum {
+    EXAMPLE_ESPNOW_DATA_BROADCAST,
+    EXAMPLE_ESPNOW_DATA_UNICAST,
+    EXAMPLE_ESPNOW_DATA_MAX,
+};
+
+/* 本示例中 ESPNOW 数据的用户定义字段 */
 typedef struct {
-    uint8_t type;       // 0=广播, 1=单播
-    uint8_t state;      // 0=初始, 1=已收到对端广播
-    uint16_t seq_num;   // 序列号
-    uint16_t crc;       // CRC16 完整性校验
-    uint32_t magic;     // 魔数，用于决定哪端发送单播
-    uint8_t payload[0]; // 柔性数组，实际载荷数据
+    uint8_t type;                         //广播或单播 ESPNOW 数据类型
+    uint8_t state;                        //Indicate that if has received broadcast ESPNOW data or not.
+    uint16_t seq_num;                     //ESPNOW 数据序列号
+    uint16_t crc;                         //ESPNOW 数据的 CRC16 校验值
+    uint32_t magic;                       //Magic number which is used to determine which device to send unicast ESPNOW data.
+    uint8_t payload[0];                   //ESPNOW 数据的实际载荷
 } __attribute__((packed)) example_espnow_data_t;
 
-/* 发送行为控制参数 */
+/* ESPNOW 发送参数 */
 typedef struct {
-    bool unicast;                       // 是否正在发送单播
-    bool broadcast;                     // 是否正在发送广播
-    uint8_t state;                      // 对端发现状态
-    uint32_t magic;                     // 随机魔数，用于角色协商
-    uint16_t count;                     // 剩余单播发送次数
-    uint16_t delay;                     // 发送间隔 (ms)
-    int len;                            // 数据包总长度 (头部+载荷)
-    uint8_t *buffer;                    // 数据包缓冲区指针
-    uint8_t dest_mac[ESP_NOW_ETH_ALEN]; // 目标 MAC 地址
+    bool unicast;                         //发送单播 ESPNOW 数据
+    bool broadcast;                       //发送广播 ESPNOW 数据
+    uint8_t state;                        //Indicate that if has received broadcast ESPNOW data or not.
+    uint32_t magic;                       //Magic number which is used to determine which device to send unicast ESPNOW data.
+    uint16_t count;                       //待发送的单播 ESPNOW 数据总数
+    uint16_t delay;                       //发送两个 ESPNOW 数据之间的延迟，单位：毫秒
+    int len;                              //待发送 ESPNOW 数据的长度，单位：字节
+    uint8_t *buffer;                      //指向 ESPNOW 数据的缓冲区
+    uint8_t dest_mac[ESP_NOW_ETH_ALEN];   //目标设备的 MAC 地址
 } example_espnow_send_param_t;
 
 #endif
