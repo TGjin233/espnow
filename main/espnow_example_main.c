@@ -29,6 +29,7 @@
 #include "esp_now.h"
 #include "esp_crc.h"
 #include "espnow_example.h"
+#include "led_blink.h"
 
 #define ESPNOW_MAXDELAY 512
 
@@ -384,4 +385,6 @@ void app_main(void)
 
     example_wifi_init();
     example_espnow_init();
+
+    xTaskCreate(led_blink_task, "led_blink_task", 2048, NULL, 5, NULL);
 }
