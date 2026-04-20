@@ -368,11 +368,41 @@ static void example_espnow_task(void *pvParameter)
                 } else if (ret == EXAMPLE_ESPNOW_DATA_UNICAST) {
                     ESP_LOGI(TAG, "收到主机的单播数据，来自："MACSTR"", MAC2STR(recv_cb->mac_addr));
                     
-                    /* 回复ACK */
-                    send_param->state = 2;  // 2 表示ACK
+                    // 确保主机在从机的对等列表中
+                    if (esp_now_is_peer_exist(recv_cb->mac_addr) == false) {
+                        ESP_LOGW(TAG, "主机不在对等列表中，尝试添加...");
+                        esp_now_peer_info_t *peer = malloc(sizeof(esp_now_peer_info_t));
+                        if (peer != NULL) {
+                            memset(peer, 0, sizeof(esp_now_peer_info_t));
+                            peer->channel = CONFIG_ESPNOW_CHANNEL;
+                            peer->ifidx = ESPNOW_WIFI_IF;
+                            peer->encrypt = false;
+                            memcpy(peer->peer_addr, recv_cb->mac_addr, ESP_NOW_ETH_ALEN);
+                            if (esp_now_add_peer(peer) == ESP_OK) {
+                                ESP_LOGI(TAG, "动态添加主机到对等列表成功");
+                            } else {
+                                ESP_LOGE(TAG, "动态添加主机失败");
+                            }
+                            free(peer);
+                        } else {
+                            ESP_LOGE(TAG, "内存分配失败");
+                        }
+                    }
+                    
+                    send_param->state = 2;
                     example_espnow_data_prepare(send_param);
-                    if (esp_now_send(recv_cb->mac_addr, send_param->buffer, send_param->len) != ESP_OK) {
-                        ESP_LOGW(TAG, "ACK回复失败");
+                    
+                    for (int retry = 0; retry < 3; retry++) {
+                        esp_err_t err = esp_now_send(recv_cb->mac_addr, send_param->buffer, send_param->len);
+                        if (err == ESP_OK) {
+                            ESP_LOGI(TAG, "ACK回复成功 (重试 %d 次)", retry);
+                            break;
+                        } else {
+                            ESP_LOGW(TAG, "ACK回复失败 (错误码: 0x%x), 重试 %d/3", err, retry + 1);
+                            if (retry < 2) {
+                                vTaskDelay(pdMS_TO_TICKS(100));
+                            }
+                        }
                     }
                 }
 #endif
