@@ -15,7 +15,7 @@
 #define DEVICE_ROLE_SLAVE   0
 
 #ifndef DEVICE_ROLE
-#define DEVICE_ROLE DEVICE_ROLE_SLAVE    /* 默认设置为从机 */
+#define DEVICE_ROLE DEVICE_ROLE_MASTER    /* 默认设置为从机 */
 #endif
 
 /* 根据角色定义设备名称 */

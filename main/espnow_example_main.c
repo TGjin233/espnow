@@ -31,6 +31,7 @@
 #include "esp_crc.h"
 #include "espnow_example.h"
 #include "led_blink.h"
+#include "lcd_display.h"
 
 #define ESPNOW_MAXDELAY 512
 
@@ -505,6 +506,9 @@ void app_main(void)
     }
     ESP_ERROR_CHECK( ret );
 
+    ESP_LOGI(TAG, "Initialize LCD display");
+    ESP_ERROR_CHECK(lcd_init());
+    
     example_wifi_init();
     
     ESP_LOGI(TAG, "========================================");
@@ -520,4 +524,5 @@ void app_main(void)
 #endif
 
     xTaskCreate(led_blink_task, "led_blink_task", 2048, NULL, 5, NULL);
+    xTaskCreate(lcd_display_task, "lcd_display_task", 4096, NULL, 3, NULL);
 }

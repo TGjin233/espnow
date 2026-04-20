@@ -1,5 +1,6 @@
 # 构建输出目录
 build/
+managed_components/
 
 # SDK 配置文件（通过 menuconfig 自动生成）
 sdkconfig.old
