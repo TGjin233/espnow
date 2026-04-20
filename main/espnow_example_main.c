@@ -16,6 +16,7 @@
 #include <time.h>
 #include <string.h>
 #include <assert.h>
+#include <inttypes.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/timers.h"
@@ -93,11 +94,11 @@ static void example_espnow_recv_cb(const esp_now_recv_info_t *recv_info, const u
     }
 
     if (IS_BROADCAST_ADDR(des_addr)) {
-        /* 如果之前添加了加密对端，接收到的包可能是加密的对等消息，
-         * 也可能是广播信道上的未加密消息。用户可通过检查目的地址来区分。 */
-        ESP_LOGD(TAG, "接收广播 ESPNOW 数据");
+        ESP_LOGI(TAG, ">>> [接收回调] 收到广播数据, 长度=%d, 来自=" MACSTR "",
+                 len, MAC2STR(mac_addr));
     } else {
-        ESP_LOGD(TAG, "接收单播 ESPNOW 数据");
+        ESP_LOGI(TAG, ">>> [接收回调] 收到单播数据, 长度=%d, 来自=" MACSTR "",
+                 len, MAC2STR(mac_addr));
     }
 
     evt.id = EXAMPLE_ESPNOW_RECV_CB;
@@ -109,6 +110,29 @@ static void example_espnow_recv_cb(const esp_now_recv_info_t *recv_info, const u
     }
     memcpy(recv_cb->data, data, len);
     recv_cb->data_len = len;
+    
+    example_espnow_data_t *buf = (example_espnow_data_t *)data;
+    uint16_t payload_len = len - sizeof(example_espnow_data_t);
+    
+#if IS_SLAVE
+    if (payload_len >= sizeof(sensor_data_t)) {
+        sensor_data_t *sensor = (sensor_data_t *)buf->payload;
+        ESP_LOGI(TAG, "========== 收到温湿度数据 ==========");
+        ESP_LOGI(TAG, "  温度: %.2f°C", sensor->temperature / 100.0);
+        ESP_LOGI(TAG, "  湿度: %.2f%%", sensor->humidity / 100.0);
+        ESP_LOGI(TAG, "  发送时间戳: %" PRIu32 " ms", sensor->timestamp);
+        ESP_LOGI(TAG, "====================================");
+    } else if (payload_len > 0) {
+        ESP_LOGI(TAG, "收到数据，长度: %d 字节（无温湿度数据）", payload_len);
+    } else {
+        ESP_LOGI(TAG, "收到数据（仅包含头部）");
+    }
+#elif IS_MASTER
+    if (payload_len >= sizeof(sensor_data_t)) {
+        ESP_LOGD(TAG, "收到来自其他主机的数据");
+    }
+#endif
+    
     if (xQueueSend(s_example_espnow_queue, &evt, ESPNOW_MAXDELAY) != pdTRUE) {
         ESP_LOGW(TAG, "接收队列失败");
         free(recv_cb->data);
@@ -116,7 +140,7 @@ static void example_espnow_recv_cb(const esp_now_recv_info_t *recv_info, const u
 }
 
 /* 解析接收到的 ESPNOW 数据 */
-int example_espnow_data_parse(uint8_t *data, uint16_t data_len, uint8_t *state, uint16_t *seq, uint32_t *magic)
+int example_espnow_data_parse(uint8_t *data, uint16_t data_len, uint8_t *state, uint16_t *seq)
 {
     example_espnow_data_t *buf = (example_espnow_data_t *)data;
     uint16_t crc, crc_cal = 0;
@@ -128,7 +152,6 @@ int example_espnow_data_parse(uint8_t *data, uint16_t data_len, uint8_t *state, 
 
     *state = buf->state;
     *seq = buf->seq_num;
-    *magic = buf->magic;
     crc = buf->crc;
     buf->crc = 0;
     crc_cal = esp_crc16_le(UINT16_MAX, (uint8_t const *)buf, data_len);
@@ -151,9 +174,16 @@ void example_espnow_data_prepare(example_espnow_send_param_t *send_param)
     buf->state = send_param->state;
     buf->seq_num = s_example_espnow_seq[buf->type]++;
     buf->crc = 0;
-    buf->magic = send_param->magic;
-    /* 用随机值填充数据后的所有剩余字节 */
-    esp_fill_random(buf->payload, send_param->len - sizeof(example_espnow_data_t));
+    
+#if IS_MASTER
+    sensor_data_t *sensor = (sensor_data_t *)buf->payload;
+    sensor->temperature = (int16_t)(esp_random() % 4000 - 1000);
+    sensor->humidity = (int16_t)(esp_random() % 10000);
+    sensor->timestamp = esp_log_timestamp();
+    ESP_LOGI(TAG, "准备发送 - 温度: %.2f°C, 湿度: %.2f%%", 
+             sensor->temperature / 100.0, sensor->humidity / 100.0);
+#endif
+    
     buf->crc = esp_crc16_le(UINT16_MAX, (uint8_t const *)buf, send_param->len);
 }
 
@@ -162,31 +192,44 @@ static void example_espnow_task(void *pvParameter)
     example_espnow_event_t evt;
     uint8_t recv_state = 0;
     uint16_t recv_seq = 0;
-    uint32_t recv_magic = 0;
     bool is_broadcast = false;
     int ret;
+    uint32_t unicast_count = 0;
 
     vTaskDelay(5000 / portTICK_PERIOD_MS);
-    ESP_LOGI(TAG, "开始发送广播数据");
-
-    /* 开始发送广播 ESPNOW 数据 */
+    
     example_espnow_send_param_t *send_param = (example_espnow_send_param_t *)pvParameter;
+    
+#if IS_MASTER
+    ESP_LOGI(TAG, "开始发送广播数据，等待从机响应...");
+    
+    /* 主机开始发送广播 ESPNOW 数据 */
     if (esp_now_send(send_param->dest_mac, send_param->buffer, send_param->len) != ESP_OK) {
         ESP_LOGE(TAG, "Send error");
         example_espnow_deinit(send_param);
         vTaskDelete(NULL);
     }
+#elif IS_SLAVE
+    ESP_LOGI(TAG, "从机模式，等待主机广播...");
+    ESP_LOGI(TAG, "将从机放到主机的广播范围内即可自动连接");
+#endif
 
     while (xQueueReceive(s_example_espnow_queue, &evt, portMAX_DELAY) == pdTRUE) {
         switch (evt.id) {
             case EXAMPLE_ESPNOW_SEND_CB:
             {
+#if IS_MASTER
                 example_espnow_event_send_cb_t *send_cb = &evt.info.send_cb;
                 is_broadcast = IS_BROADCAST_ADDR(send_cb->mac_addr);
 
-                ESP_LOGD(TAG, "发送数据到 "MACSTR"，状态：%d", MAC2STR(send_cb->mac_addr), send_cb->status);
+                if (send_cb->status == ESP_NOW_SEND_SUCCESS) {
+                    ESP_LOGI(TAG, ">>> [发送回调] 发送成功到 " MACSTR "", MAC2STR(send_cb->mac_addr));
+                } else {
+                    ESP_LOGI(TAG, ">>> [发送回调] 发送失败到 " MACSTR "，状态：%d", MAC2STR(send_cb->mac_addr), send_cb->status);
+                }
 
                 if (is_broadcast && (send_param->broadcast == false)) {
+                    ESP_LOGI(TAG, "已切换到单播模式，忽略广播回调");
                     break;
                 }
 
@@ -206,6 +249,13 @@ static void example_espnow_task(void *pvParameter)
 
                 ESP_LOGI(TAG, "发送数据到 "MACSTR"", MAC2STR(send_cb->mac_addr));
 
+                /* 单播计数器递增 */
+                if (!is_broadcast) {
+                    unicast_count++;
+                    ESP_LOGI(TAG, "★ [单播 #%" PRIu32 "] 发送到 " MACSTR "", 
+                             unicast_count, MAC2STR(send_cb->mac_addr));
+                }
+
                 memcpy(send_param->dest_mac, send_cb->mac_addr, ESP_NOW_ETH_ALEN);
                 example_espnow_data_prepare(send_param);
 
@@ -215,18 +265,34 @@ static void example_espnow_task(void *pvParameter)
                     example_espnow_deinit(send_param);
                     vTaskDelete(NULL);
                 }
+#elif IS_SLAVE
+                /* 从机不发送数据，只记录发送状态 */
+                ESP_LOGD(TAG, "[从机] 忽略发送回调");
+#endif
                 break;
             }
             case EXAMPLE_ESPNOW_RECV_CB:
             {
                 example_espnow_event_recv_cb_t *recv_cb = &evt.info.recv_cb;
 
-                ret = example_espnow_data_parse(recv_cb->data, recv_cb->data_len, &recv_state, &recv_seq, &recv_magic);
+                ret = example_espnow_data_parse(recv_cb->data, recv_cb->data_len, &recv_state, &recv_seq);
                 free(recv_cb->data);
-                if (ret == EXAMPLE_ESPNOW_DATA_BROADCAST) {
-                    ESP_LOGI(TAG, "接收第 %d 个广播数据，来自："MACSTR"，长度：%d", recv_seq, MAC2STR(recv_cb->mac_addr), recv_cb->data_len);
+                
+#if IS_MASTER
+                /* 主机收到任何从机的消息（广播或单播），都尝试获取从机MAC */
+                if (ret == EXAMPLE_ESPNOW_DATA_BROADCAST || ret == EXAMPLE_ESPNOW_DATA_UNICAST) {
+                    
+                    ESP_LOGI(TAG, "★★★ 收到数据包! 类型=%d, state=%d, 来自=" MACSTR "",
+                             ret, recv_state, MAC2STR(recv_cb->mac_addr));
 
-                    /* 如果 MAC 地址不存在于对端列表中，将其添加到对端列表 */
+                    /* 检查是否是从机的响应（state=1表示从机已就绪） */
+                    if (recv_state == 1) {
+                        ESP_LOGI(TAG, "收到从机的响应，来自："MACSTR"", MAC2STR(recv_cb->mac_addr));
+                    } else {
+                        ESP_LOGI(TAG, "收到从机的广播，来自："MACSTR"", MAC2STR(recv_cb->mac_addr));
+                    }
+
+                    /* 添加从机到对等列表（使用与广播相同的配置，不加密） */
                     if (esp_now_is_peer_exist(recv_cb->mac_addr) == false) {
                         esp_now_peer_info_t *peer = malloc(sizeof(esp_now_peer_info_t));
                         if (peer == NULL) {
@@ -237,52 +303,79 @@ static void example_espnow_task(void *pvParameter)
                         memset(peer, 0, sizeof(esp_now_peer_info_t));
                         peer->channel = CONFIG_ESPNOW_CHANNEL;
                         peer->ifidx = ESPNOW_WIFI_IF;
-                        peer->encrypt = true;
-                        memcpy(peer->lmk, CONFIG_ESPNOW_LMK, ESP_NOW_KEY_LEN);
+                        peer->encrypt = false;
                         memcpy(peer->peer_addr, recv_cb->mac_addr, ESP_NOW_ETH_ALEN);
                         ESP_ERROR_CHECK( esp_now_add_peer(peer) );
                         free(peer);
+                        ESP_LOGI(TAG, "已将 MAC " MACSTR " 添加到对等列表(不加密)", MAC2STR(recv_cb->mac_addr));
                     }
 
-                    /* 指示设备已收到广播 ESPNOW 数据 */
-                    if (send_param->state == 0) {
-                        send_param->state = 1;
-                    }
-
-                    /* 如果收到表示对端已收到广播 ESPNOW 数据的广播，
-                     * 且本地魔数大于接收到的广播中的魔数，
-                     * 则停止发送广播 ESPNOW 数据，开始发送单播 ESPNOW 数据。
-                     */
-                    if (recv_state == 1) {
-                        /* 魔数较大的设备发送 ESPNOW 数据，另一台接收 ESPNOW 数据 */
-                        if (send_param->unicast == false && send_param->magic >= recv_magic) {
-                    	    ESP_LOGI(TAG, "开始发送单播数据");
-                    	    ESP_LOGI(TAG, "发送数据到 "MACSTR"", MAC2STR(recv_cb->mac_addr));
-
-                    	    /* 开始发送单播 ESPNOW 数据 */
-                            memcpy(send_param->dest_mac, recv_cb->mac_addr, ESP_NOW_ETH_ALEN);
-                            example_espnow_data_prepare(send_param);
-                            if (esp_now_send(send_param->dest_mac, send_param->buffer, send_param->len) != ESP_OK) {
-                                ESP_LOGE(TAG, "Send error");
-                                example_espnow_deinit(send_param);
-                                vTaskDelete(NULL);
-                            }
-                            else {
-                                send_param->broadcast = false;
-                                send_param->unicast = true;
-                            }
+                    /* 主机收到从机响应后，切换到单播模式 */
+                    if (send_param->unicast == false) {
+                        ESP_LOGI(TAG, "从机已就绪，开始向从机发送数据");
+                        memcpy(send_param->dest_mac, recv_cb->mac_addr, ESP_NOW_ETH_ALEN);
+                        send_param->broadcast = false;
+                        send_param->unicast = true;
+                        
+                        /* 立即发送第一个单播数据 */
+                        example_espnow_data_prepare(send_param);
+                        if (esp_now_send(send_param->dest_mac, send_param->buffer, send_param->len) != ESP_OK) {
+                            ESP_LOGE(TAG, "发送错误");
+                            example_espnow_deinit(send_param);
+                            vTaskDelete(NULL);
                         }
                     }
+                } else if (ret == -1) {
+                    ESP_LOGW(TAG, "数据校验失败，忽略此包");
                 }
-                else if (ret == EXAMPLE_ESPNOW_DATA_UNICAST) {
-                    ESP_LOGI(TAG, "接收第 %d 个单播数据，来自："MACSTR"，长度：%d", recv_seq, MAC2STR(recv_cb->mac_addr), recv_cb->data_len);
+                
+                /* 主机收到从机的ACK（state=2） */
+                if (recv_state == 2) {
+                    ESP_LOGI(TAG, "收到从机的ACK");
+                }
+#elif IS_SLAVE
+                if (ret == EXAMPLE_ESPNOW_DATA_BROADCAST) {
+                    ESP_LOGI(TAG, "收到主机的广播，来自："MACSTR"", MAC2STR(recv_cb->mac_addr));
 
-                    /* 如果收到单播 ESPNOW 数据，也停止发送广播 ESPNOW 数据 */
-                    send_param->broadcast = false;
+                    /* 添加主机到对等列表 */
+                    if (esp_now_is_peer_exist(recv_cb->mac_addr) == false) {
+                        esp_now_peer_info_t *peer = malloc(sizeof(esp_now_peer_info_t));
+                        if (peer == NULL) {
+                            ESP_LOGE(TAG, "对端信息内存分配失败");
+                            example_espnow_deinit(send_param);
+                            vTaskDelete(NULL);
+                        }
+                        memset(peer, 0, sizeof(esp_now_peer_info_t));
+                        peer->channel = CONFIG_ESPNOW_CHANNEL;
+                        peer->ifidx = ESPNOW_WIFI_IF;
+                        peer->encrypt = false;
+                        memcpy(peer->peer_addr, recv_cb->mac_addr, ESP_NOW_ETH_ALEN);
+                        ESP_ERROR_CHECK( esp_now_add_peer(peer) );
+                        free(peer);
+                        
+                        ESP_LOGI(TAG, "已添加主机到对等列表(不加密)，准备回复主机...");
+                        ESP_LOGI(TAG, ">>> 发送回复到=" MACSTR "", MAC2STR(recv_cb->mac_addr));
+                        
+                        /* 回复主机，告知从机已就绪 */
+                        send_param->state = 1;
+                        example_espnow_data_prepare(send_param);
+                        if (esp_now_send(recv_cb->mac_addr, send_param->buffer, send_param->len) != ESP_OK) {
+                            ESP_LOGE(TAG, "回复主机失败");
+                        } else {
+                            ESP_LOGI(TAG, "已回复主机，从机就绪");
+                        }
+                    }
+                } else if (ret == EXAMPLE_ESPNOW_DATA_UNICAST) {
+                    ESP_LOGI(TAG, "收到主机的单播数据，来自："MACSTR"", MAC2STR(recv_cb->mac_addr));
+                    
+                    /* 回复ACK */
+                    send_param->state = 2;  // 2 表示ACK
+                    example_espnow_data_prepare(send_param);
+                    if (esp_now_send(recv_cb->mac_addr, send_param->buffer, send_param->len) != ESP_OK) {
+                        ESP_LOGW(TAG, "ACK回复失败");
+                    }
                 }
-                else {
-                    ESP_LOGI(TAG, "从 "MACSTR" 接收到错误数据", MAC2STR(recv_cb->mac_addr));
-                }
+#endif
                 break;
             }
             default:
@@ -313,7 +406,7 @@ static esp_err_t example_espnow_init(void)
     /* 设置主密钥 */
     ESP_ERROR_CHECK( esp_now_set_pmk((uint8_t *)CONFIG_ESPNOW_PMK) );
 
-    /* 添加广播对端信息到对端列表 */
+    /* 添加广播对端信息到对等列表 */
     esp_now_peer_info_t *peer = malloc(sizeof(esp_now_peer_info_t));
     if (peer == NULL) {
         ESP_LOGE(TAG, "对端信息内存分配失败");
@@ -343,7 +436,6 @@ static esp_err_t example_espnow_init(void)
     send_param->unicast = false;
     send_param->broadcast = true;
     send_param->state = 0;
-    send_param->magic = esp_random();
     send_param->count = CONFIG_ESPNOW_SEND_COUNT;
     send_param->delay = CONFIG_ESPNOW_SEND_DELAY;
     send_param->len = CONFIG_ESPNOW_SEND_LEN;
@@ -384,7 +476,18 @@ void app_main(void)
     ESP_ERROR_CHECK( ret );
 
     example_wifi_init();
+    
+    ESP_LOGI(TAG, "========================================");
+    ESP_LOGI(TAG, "  设备角色: %s", DEVICE_NAME);
+    ESP_LOGI(TAG, "========================================");
+    
+#if IS_MASTER
+    ESP_LOGI(TAG, "  [主机模式] 初始化中...");
     example_espnow_init();
+#elif IS_SLAVE
+    ESP_LOGI(TAG, "  [从机模式] 初始化中...");
+    example_espnow_init();
+#endif
 
     xTaskCreate(led_blink_task, "led_blink_task", 2048, NULL, 5, NULL);
 }
