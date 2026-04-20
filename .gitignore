@@ -1,0 +1,24 @@
+# 构建输出目录
+build/
+
+# SDK 配置文件（通过 menuconfig 自动生成）
+sdkconfig.old
+
+# VS Code 工作区配置
+.vscode/
+
+# # 编译生成文件
+# *.o
+# *.d
+# *.elf
+# *.bin
+# *.map
+# *.log
+
+# # Python 缓存
+# __pycache__/
+# *.pyc
+
+# # 系统文件
+# .DS_Store
+# Thumbs.db
